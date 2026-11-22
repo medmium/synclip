@@ -4,25 +4,20 @@ import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
-import android.content.BroadcastReceiver;
 import android.content.Context;
-import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
-import android.media.AudioAttributes;
 import android.os.Build;
-import android.os.VibrationAttributes;
-import android.os.VibrationEffect;
-import android.os.Vibrator;
 import android.widget.Toast;
 
-public final class SyncAlertReceiver extends BroadcastReceiver {
-    private static final String ACTION = "synclip.pair.action.SYNC_RECEIVED";
+final class SyncAlerts {
     private static final String PREFERENCES = "sync_alert";
     private static final String MODE = "mode";
+    private static final String SHOW_NOTIFICATION_CONTENT = "show_notification_content";
     private static final String CHANNEL = "clipboard_sync";
     private static final String RECEIVED = "收到一条同步文本";
     private static final int NOTIFICATION_ID = 1;
+    private static final int MAX_PREVIEW_CHARACTERS = 240;
 
     enum Mode {
         OFF("关闭", false),
@@ -48,6 +43,24 @@ public final class SyncAlertReceiver extends BroadcastReceiver {
             return Mode.valueOf(preferences(context).getString(MODE, Mode.OFF.name()));
         } catch (IllegalArgumentException | ClassCastException error) {
             return Mode.OFF;
+        }
+    }
+
+    static boolean showsNotificationContent(Context context) {
+        try {
+            return preferences(context).getBoolean(SHOW_NOTIFICATION_CONTENT, false);
+        } catch (ClassCastException error) {
+            return false;
+        }
+    }
+
+    static void saveShowNotificationContent(Context context, boolean enabled) {
+        preferences(context).edit().putBoolean(SHOW_NOTIFICATION_CONTENT, enabled).apply();
+        if (!enabled) {
+            NotificationManager manager = context.getSystemService(NotificationManager.class);
+            if (manager != null) {
+                manager.cancel(NOTIFICATION_ID);
+            }
         }
     }
 
@@ -77,10 +90,7 @@ public final class SyncAlertReceiver extends BroadcastReceiver {
         return mode != Mode.NOTIFICATION || channel == null || channel.getImportance() != NotificationManager.IMPORTANCE_NONE;
     }
 
-    @Override public void onReceive(Context context, Intent intent) {
-        if (intent == null || !ACTION.equals(intent.getAction())) {
-            return;
-        }
+    static void deliver(Context context, String text) {
         Mode mode = selectedMode(context);
         if (mode.usesNotifications && !notificationsAvailable(context, mode)) {
             return;
@@ -91,11 +101,9 @@ public final class SyncAlertReceiver extends BroadcastReceiver {
                     Toast.makeText(context, RECEIVED, Toast.LENGTH_SHORT).show();
                     break;
                 case NOTIFICATION:
-                    showNotification(context);
+                    showNotification(context, showsNotificationContent(context) ? text : null);
                     break;
-                case VIBRATION:
-                    vibrate(context);
-                    break;
+                case VIBRATION: // The module daemon delivers vibration directly.
                 case OFF:
                     break;
             }
@@ -112,36 +120,27 @@ public final class SyncAlertReceiver extends BroadcastReceiver {
         manager.createNotificationChannel(channel);
     }
 
-    private static void showNotification(Context context) {
+    private static void showNotification(Context context, String text) {
         NotificationManager manager = context.getSystemService(NotificationManager.class);
         if (manager == null) {
             return;
         }
         createChannel(manager);
-        Notification notification = new Notification.Builder(context, CHANNEL)
+        Notification.Builder builder = new Notification.Builder(context, CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setContentTitle("SynClip")
-                .setContentText(RECEIVED)
                 .setShowWhen(true)
                 .setOnlyAlertOnce(true)
-                .setVisibility(Notification.VISIBILITY_PRIVATE)
-                .build();
-        manager.notify(NOTIFICATION_ID, notification);
-    }
-
-    @SuppressWarnings("deprecation")
-    private static void vibrate(Context context) {
-        Vibrator vibrator = context.getSystemService(Vibrator.class);
-        if (vibrator == null || !vibrator.hasVibrator()) {
-            return;
-        }
-        VibrationEffect pulse = VibrationEffect.createOneShot(180, VibrationEffect.DEFAULT_AMPLITUDE);
-        if (Build.VERSION.SDK_INT >= 33) {
-            vibrator.vibrate(pulse, new VibrationAttributes.Builder()
-                    .setUsage(VibrationAttributes.USAGE_NOTIFICATION).build());
+                .setVisibility(Notification.VISIBILITY_PRIVATE);
+        if (text == null || text.isEmpty()) {
+            builder.setContentText(RECEIVED);
         } else {
-            vibrator.vibrate(pulse, new AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_NOTIFICATION).build());
+            String preview = text;
+            if (text.codePointCount(0, text.length()) > MAX_PREVIEW_CHARACTERS) {
+                preview = text.substring(0, text.offsetByCodePoints(0, MAX_PREVIEW_CHARACTERS - 1)) + "…";
+            }
+            builder.setContentText(preview).setStyle(new Notification.BigTextStyle().bigText(preview));
         }
+        manager.notify(NOTIFICATION_ID, builder.build());
     }
 }

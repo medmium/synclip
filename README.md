@@ -6,21 +6,27 @@ SynClip 在局域网内同步 Windows 和 Android 的纯文本剪贴板。一台
 
 从 GitHub 下载源码后，先按下文的构建步骤生成 `dist/` 中的安装文件。以下路径以项目根目录为基准。
 
-1. 退出 Windows 托盘的旧版 SynClip，运行 `dist\windows-v0.3\SynClip.exe`。若防火墙询问，允许它访问专用网络。
-2. 用 Magisk 或 KernelSU 管理器安装 `dist\synclip-android-v0.3.2.zip`，然后重启手机。模块会在启动后安装内置的 SynClip 配对应用。模块支持 Android 10 及以上的 `arm64-v8a` 和 `x86_64` 设备。KernelSU 无需系统挂载元模块。
+1. 退出 Windows 托盘的旧版 SynClip，运行 `dist\windows-v0.3.5\SynClip.exe`。若防火墙询问，允许它访问专用网络。
+2. 用 Magisk 或 KernelSU 管理器安装 `dist\synclip-android-v0.3.5.zip`，然后重启手机。模块会在启动后安装内置的 SynClip 配对应用。模块支持 Android 10 及以上的 `arm64-v8a` 和 `x86_64` 设备。KernelSU 无需系统挂载元模块。
 3. 电脑和手机接入同一可互通的局域网。在 Windows 托盘选「扫码配对」，选择手机可访问的电脑 IP。
 4. 在手机的模块管理器里点 SynClip 的「操作」，或从应用列表打开 **SynClip 配对**。扫描电脑上的二维码，确认地址并按提示授予 Root 权限。Windows 的设备管理会显示连接状态。配对后可以关闭应用，由模块继续同步。
 5. 添加更多手机时重复扫码流程，每台手机使用单独生成的二维码。最多可添加 16 台设备，可在 Windows 托盘逐台移除。
 
 二维码三分钟内有效，成功配对后即失效。扫码配对无需 ADB。新版模块已经启动时，扫码更换配对无需再次重启。每台手机配对到一个 Windows 主机，重新扫码会切换该手机的主机。
 
-从旧版升级时，用新版 ZIP 覆盖安装原模块即可保留手机配置。桌面端继续使用 Windows 0.3。由 Windows 0.2 保留的配对会显示为「旧版手机」。要为它分配独立密钥，可重新扫码，再在 Windows 移除「旧版手机」。
+从旧版升级时，用新版 ZIP 覆盖安装原模块即可保留手机配置。由 Windows 0.2 保留的配对会显示为「旧版手机」。要为它分配独立密钥，可重新扫码，再在 Windows 移除「旧版手机」。
 
 ## 手机同步提醒
 
-打开 **SynClip 配对 → 同步提醒**，选择关闭、Toast、系统通知或振动。默认关闭，选项保存在本机。提醒在手机写入经 Windows 同步来的文本后触发，提示中只显示「收到一条同步文本」。
+打开 **SynClip 配对 → 同步提醒**，选择关闭、Toast、系统通知或振动。默认关闭，选项保存在本机。提醒在手机写入经 Windows 同步来的文本后触发。选择系统通知时，可另行勾选 **在系统通知中显示复制的内容**。正文预览默认关闭，开启后会截短较长的文本。
 
-Toast 和系统通知需要允许 SynClip 配对显示通知。选择对应模式时按系统提示授权。系统通知会更新同一条通知，振动使用系统通知振动设置。 [Android 通知权限](https://developer.android.com/develop/ui/compose/notifications/notification-permission) · [Android 振动 API](https://developer.android.com/reference/android/os/Vibrator)
+可以关闭手机上的配对界面。后台模块负责保持同步连接和直接触发振动。Toast 和系统通知通过受权限保护的本地接口，以 SynClip 的应用身份显示。更改提醒方式后，模块会在几秒内读取新设置，无需重新连接。Windows 端请保留托盘程序运行。
+
+Toast 和系统通知需要允许 SynClip 配对显示通知。选择对应模式时按系统提示授权。部分 ROM 会拦截长时间处于后台的应用发出的 Toast，在运行 Android 16 的 ColorOS 真机上观察到了这一行为。系统通知会更新同一条通知，振动使用系统通知振动设置。 [Android 通知权限](https://developer.android.com/develop/ui/compose/notifications/notification-permission) · [Android 振动 API](https://developer.android.com/reference/android/os/Vibrator)
+
+## Windows 托盘选项
+
+右键单击 SynClip 托盘图标。勾选 **登录 Windows 时启动**，当前账号登录后 SynClip 会自动在托盘运行。勾选 **通知中显示手机剪贴板**，电脑写入从手机同步来的文本后会显示一段通知预览。预览默认关闭。
 
 ## 同步行为
 
@@ -36,7 +42,7 @@ Windows 需要 CMake 3.24+、Ninja 和支持 C++17 的 MSVC 或 MinGW-w64。CMak
 ```powershell
 cmake -S . -B build/windows -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build build/windows
-cmake --install build/windows --prefix dist/windows-v0.3 --component SynClipRuntime
+cmake --install build/windows --prefix dist/windows-v0.3.5 --component SynClipRuntime
 ```
 
 Android 构建需要 SDK Platform 29 和 34、Android Build Tools 35 或以上、NDK r27 或以上、JDK 17 或以上、CMake 3.24+ 和 Ninja。可用 `-SdkRoot` 和 `-NdkRoot` 指定本机工具链。脚本会签名配对 APK，并把它嵌入模块 ZIP。

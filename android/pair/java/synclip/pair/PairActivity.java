@@ -10,6 +10,7 @@ import android.os.Bundle;
 import android.provider.Settings;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -142,16 +143,16 @@ public final class PairActivity extends Activity implements ScanPreview.Listener
             }
         } else if (request == REQUEST_NOTIFICATIONS) {
             updateAlertOptions();
-            SyncAlertReceiver.Mode mode = SyncAlertReceiver.selectedMode(this);
-            if (results.length != 0 && mode.usesNotifications && !SyncAlertReceiver.notificationsAvailable(this, mode)) {
+            SyncAlerts.Mode mode = SyncAlerts.selectedMode(this);
+            if (results.length != 0 && mode.usesNotifications && !SyncAlerts.notificationsAvailable(this, mode)) {
                 offerNotificationSettings();
             }
         }
     }
 
     private void updateAlertOptions() {
-        SyncAlertReceiver.Mode mode = SyncAlertReceiver.selectedMode(this);
-        boolean blocked = mode.usesNotifications && !SyncAlertReceiver.notificationsAvailable(this, mode);
+        SyncAlerts.Mode mode = SyncAlerts.selectedMode(this);
+        boolean blocked = mode.usesNotifications && !SyncAlerts.notificationsAvailable(this, mode);
         alertOptions.setText("同步提醒 · " + mode.label + (blocked ? "（通知未开启）" : ""));
     }
 
@@ -159,27 +160,37 @@ public final class PairActivity extends Activity implements ScanPreview.Listener
         if (scanning) {
             scanAgain("需要配对时，请扫描 Windows 上的二维码。");
         }
-        SyncAlertReceiver.Mode[] modes = SyncAlertReceiver.Mode.values();
+        SyncAlerts.Mode[] modes = SyncAlerts.Mode.values();
         String[] choices = new String[modes.length];
         for (int i = 0; i < modes.length; ++i) {
             choices[i] = modes[i].label;
         }
+        CheckBox notificationContent = new CheckBox(this);
+        notificationContent.setText("在系统通知中显示复制的内容");
+        notificationContent.setChecked(SyncAlerts.showsNotificationContent(this));
+        notificationContent.setOnCheckedChangeListener((button, enabled) ->
+                SyncAlerts.saveShowNotificationContent(this, enabled));
+        LinearLayout previewOptions = new LinearLayout(this);
+        previewOptions.setPadding(dp(20), 0, dp(20), 0);
+        previewOptions.addView(notificationContent);
+
         new AlertDialog.Builder(this)
                 .setTitle("同步提醒")
-                .setSingleChoiceItems(choices, SyncAlertReceiver.selectedMode(this).ordinal(), (dialog, which) -> {
+                .setSingleChoiceItems(choices, SyncAlerts.selectedMode(this).ordinal(), (dialog, which) -> {
                     dialog.dismiss();
-                    SyncAlertReceiver.Mode mode = modes[which];
-                    SyncAlertReceiver.saveMode(this, mode);
+                    SyncAlerts.Mode mode = modes[which];
+                    SyncAlerts.saveMode(this, mode);
                     updateAlertOptions();
                     if (mode.usesNotifications) {
-                        if (!SyncAlertReceiver.hasNotificationPermission(this)) {
+                        if (!SyncAlerts.hasNotificationPermission(this)) {
                             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQUEST_NOTIFICATIONS);
-                        } else if (!SyncAlertReceiver.notificationsAvailable(this, mode)) {
+                        } else if (!SyncAlerts.notificationsAvailable(this, mode)) {
                             offerNotificationSettings();
                         }
                     }
                 })
-                .setNegativeButton("取消", null)
+                .setView(previewOptions)
+                .setPositiveButton("完成", null)
                 .show();
     }
 

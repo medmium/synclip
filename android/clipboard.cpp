@@ -1,8 +1,10 @@
 #include "synclip/transport.hpp"
 
 #include <arpa/inet.h>
+#include <fcntl.h>
 #include <jni.h>
 #include <sys/prctl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <algorithm>
@@ -221,6 +223,44 @@ jstring java_text(JNIEnv* env, std::string_view text) {
     return env->NewString(units.data(), static_cast<jsize>(units.size()));
 }
 
+enum class ReceiveAlert { off, provider, preview, vibration };
+
+ReceiveAlert receive_alert_mode(const std::string& path) {
+    const int fd = open(path.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (fd == -1) {
+        return ReceiveAlert::off;
+    }
+
+    std::array<char, 16> text{};
+    struct stat file{};
+    ssize_t size = -1;
+    if (fstat(fd, &file) == 0 && S_ISREG(file.st_mode) && file.st_uid == 0 &&
+        (file.st_mode & (S_IWGRP | S_IWOTH)) == 0) {
+        do {
+            size = read(fd, text.data(), text.size());
+        } while (size < 0 && errno == EINTR);
+    }
+    close(fd);
+    if (size <= 0 || static_cast<size_t>(size) == text.size()) {
+        return ReceiveAlert::off;
+    }
+
+    auto mode = std::string_view(text.data(), static_cast<size_t>(size));
+    if (mode.back() == '\n') {
+        mode.remove_suffix(1);
+    }
+    if (mode == "VIBRATION") {
+        return ReceiveAlert::vibration;
+    }
+    if (mode == "TOAST" || mode == "NOTIFICATION") {
+        return ReceiveAlert::provider;
+    }
+    if (mode == "NOTIFY_PREVIEW") {
+        return ReceiveAlert::preview;
+    }
+    return ReceiveAlert::off;
+}
+
 struct ClipboardEvents {
     std::mutex mutex;
     std::condition_variable ready;
@@ -235,32 +275,23 @@ ClipboardEvents& events() {
     return *lifetime_events;
 }
 
-int run(JNIEnv* env, jobject bridge, bool check) {
+int run(JNIEnv* env, jobject bridge, bool check, const std::string& alert_mode_path) {
     if (prctl(PR_SET_DUMPABLE, 0L, 0L, 0L, 0L) != 0) {
         throw std::runtime_error("could not protect the Android runtime's memory");
     }
     auto& signal = events();
-    std::unique_ptr<synclip::Sender> sender;
-    if (!check) {
-        auto config = read_configuration();
-        sender = std::make_unique<synclip::Sender>(std::move(config.host), config.port, config.key,
-            [&signal](std::string text) {
-                {
-                    std::lock_guard lock(signal.mutex);
-                    signal.remote_text = std::move(text);
-                }
-                signal.ready.notify_one();
-            }, std::move(config.device));
-    }
-
     const jclass type = env->GetObjectClass(bridge);
     const jmethodID attach = env->GetMethodID(type, "attach", "()Z");
     const jmethodID read_text = env->GetMethodID(type, "readText", "()Ljava/lang/String;");
-    const jmethodID write_text = env->GetMethodID(type, "writeText", "(Ljava/lang/String;)V");
+    const jmethodID write_text = env->GetMethodID(type, "writeText", "(Ljava/lang/String;)Z");
     const jmethodID timestamp = env->GetMethodID(type, "timestamp", "()J");
     const jmethodID was_remote = env->GetMethodID(type, "wasRemote", "()Z");
-    if (attach == nullptr || read_text == nullptr || write_text == nullptr ||
-        timestamp == nullptr || was_remote == nullptr) {
+    const jmethodID provider_alert = env->GetMethodID(type, "notifyReceiveAlertAsync", "()V");
+    const jmethodID preview_alert = env->GetMethodID(type, "notifyReceivePreviewAsync", "(Ljava/lang/String;)V");
+    const jmethodID vibration_alert = env->GetMethodID(type, "vibrateReceiveAlertAsync", "()V");
+    if (preview_alert == nullptr || attach == nullptr || read_text == nullptr || write_text == nullptr ||
+        timestamp == nullptr || was_remote == nullptr || provider_alert == nullptr ||
+        vibration_alert == nullptr) {
         return 1;
     }
     const auto service_deadline = std::chrono::steady_clock::now() + 10s;
@@ -274,6 +305,19 @@ int run(JNIEnv* env, jobject bridge, bool check) {
         std::this_thread::sleep_for(500ms);
     }
     std::fputs("SynClip: listening for Android clipboard changes\n", stderr);
+
+    std::unique_ptr<synclip::Sender> sender;
+    if (!check) {
+        auto config = read_configuration();
+        sender = std::make_unique<synclip::Sender>(std::move(config.host), config.port, config.key,
+            [&signal](std::string text) {
+                {
+                    std::lock_guard lock(signal.mutex);
+                    signal.remote_text = std::move(text);
+                }
+                signal.ready.notify_one();
+            }, std::move(config.device));
+    }
 
     const auto check_deadline = std::chrono::steady_clock::now() + 45s;
     std::string previous_text;
@@ -328,13 +372,31 @@ int run(JNIEnv* env, jobject bridge, bool check) {
                     }
                 }
             }
-            if (write) {
-                env->CallVoidMethod(bridge, write_text, value);
-            }
-            env->DeleteLocalRef(value);
+            const bool applied = write && env->CallBooleanMethod(bridge, write_text, value) == JNI_TRUE;
             if (env->ExceptionCheck()) {
+                env->DeleteLocalRef(value);
                 return 1;
             }
+            if (applied) {
+                switch (receive_alert_mode(alert_mode_path)) {
+                case ReceiveAlert::provider:
+                    env->CallVoidMethod(bridge, provider_alert);
+                    break;
+                case ReceiveAlert::preview:
+                    env->CallVoidMethod(bridge, preview_alert, value);
+                    break;
+                case ReceiveAlert::vibration:
+                    env->CallVoidMethod(bridge, vibration_alert);
+                    break;
+                case ReceiveAlert::off:
+                    break;
+                }
+                if (env->ExceptionCheck()) {
+                    env->ExceptionClear();
+                    std::fputs("SynClip: could not queue a receive alert\n", stderr);
+                }
+            }
+            env->DeleteLocalRef(value);
             continue;
         }
 
@@ -386,9 +448,10 @@ extern "C" JNIEXPORT void JNICALL Java_synclip_ClipboardBridge_nativeNotify(
 }
 
 extern "C" JNIEXPORT jint JNICALL Java_synclip_ClipboardBridge_nativeRun(
-        JNIEnv* env, jobject bridge, jboolean check) {
+        JNIEnv* env, jobject bridge, jboolean check, jstring alert_mode_path) {
     try {
-        return run(env, bridge, check == JNI_TRUE);
+        const auto mode_path = utf8_text(env, alert_mode_path);
+        return env->ExceptionCheck() ? 1 : run(env, bridge, check == JNI_TRUE, mode_path);
     } catch (const std::exception& error) {
         std::fprintf(stderr, "SynClip: %s\n", error.what());
         return 1;

@@ -15,7 +15,7 @@ Set-StrictMode -Version Latest
 
 $project = Split-Path -Parent $PSScriptRoot
 if (-not $BuildRoot) { $BuildRoot = Join-Path $project 'build/android' }
-if (-not $Output) { $Output = Join-Path $project 'dist/synclip-android-v0.3.2.zip' }
+if (-not $Output) { $Output = Join-Path $project 'dist/synclip-android-v0.3.5.zip' }
 $BuildRoot = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($BuildRoot)
 $Output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Output)
 $Abis = @($Abis | Select-Object -Unique)

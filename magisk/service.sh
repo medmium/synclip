@@ -3,6 +3,7 @@
 MODDIR=${0%/*}
 RUNTIME_DIR=/data/local/synclip
 CONFIG=/data/adb/synclip/config
+ALERT_PREFERENCES=/data/user/0/synclip.pair/shared_prefs/sync_alert.xml
 
 log_status() {
   /system/bin/log -t SynClip -p "$1" "$2"
@@ -111,9 +112,48 @@ config_stamp() {
   stat -c '%d:%i:%s:%Y' "$CONFIG" 2>/dev/null
 }
 
+# Keep the app's preference as the source of truth. The Shell-UID daemon
+# reads this root-owned projection without launching the app or reconnecting.
+last_alert_stamp=unread
+sync_alert_mode() {
+  local source_stamp mode preferences staging
+  [ ! -e "$ALERT_PREFERENCES.bak" ] || return 0
+  source_stamp=missing
+  if [ ! -L "$ALERT_PREFERENCES" ] && [ -f "$ALERT_PREFERENCES" ]; then
+    source_stamp=$(stat -c '%d:%i:%s:%Y' "$ALERT_PREFERENCES" 2>/dev/null) || source_stamp=missing
+  fi
+  if [ "$source_stamp" = "$last_alert_stamp" ] && [ -f "$RUNTIME_DIR/alert.mode" ]; then
+    return 0
+  fi
+
+  mode=OFF
+  if [ "$source_stamp" != missing ]; then
+    preferences=$(head -c 4096 "$ALERT_PREFERENCES" 2>/dev/null)
+    mode=$(printf '%s\n' "$preferences" |
+      sed -n 's/.*<string name="mode">\([A-Z]*\)<\/string>.*/\1/p')
+    case "$mode" in
+      NOTIFICATION)
+        if printf '%s\n' "$preferences" | grep -Eq '^[[:space:]]*<boolean name="show_notification_content" value="true"[[:space:]]*/>[[:space:]]*$'; then
+          mode=NOTIFY_PREVIEW
+        fi
+        ;;
+      OFF|TOAST|VIBRATION) ;;
+      *) mode=OFF ;;
+    esac
+  fi
+  staging=$(mktemp "$RUNTIME_DIR/.alert-mode.XXXXXX") || return 1
+  if ! printf '%s\n' "$mode" > "$staging" || ! chown 0:2000 "$staging" ||
+      ! chmod 0640 "$staging" || ! mv -f "$staging" "$RUNTIME_DIR/alert.mode"; then
+    rm -f "$staging"
+    return 1
+  fi
+  last_alert_stamp=$source_stamp
+}
+
 while module_enabled; do
   if [ -s "$CONFIG" ]; then
     stamp=$(config_stamp)
+    sync_alert_mode || log_status w 'Could not publish the receive alert mode.'
     (while IFS= read -r line; do log_status i "$line"; done) < "$diagnostics" &
     reader=$!
     (exec "$MODDIR/bin/synclip-android-launcher" "$RUNTIME_DIR/synclip.jar" \
@@ -121,6 +161,7 @@ while module_enabled; do
     runner=$!
     while module_enabled && kill -0 "$runner" 2>/dev/null && [ "$(config_stamp)" = "$stamp" ]; do
       sleep 2
+      sync_alert_mode
     done
     stop_runner
     module_enabled || break

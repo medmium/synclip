@@ -54,7 +54,7 @@ synclip_pair_install() (
     exit 1
   fi
   if result=$(cat "$SYNCLIP_PAIR_APK" | /system/bin/pm install "$replace" --user 0 \
-      --pkg "$SYNCLIP_PAIR_PACKAGE" -S "$size" - 2>&1); then
+      --pkg "$SYNCLIP_PAIR_PACKAGE" -S "$size" -- - 2>&1); then
     if ! after=$(synclip_pair_info) || [ -z "$after" ] || [ "${after%% *}" -lt "$expected" ]; then
       printf '%s\n' 'Android did not report the expected installed pairing app.' >&2
       exit 1

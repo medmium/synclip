@@ -8,7 +8,7 @@ if [ -r "$MODDIR/companion.sh" ]; then
 fi
 
 if [ -d /data/local/synclip ] && [ ! -L /data/local/synclip ] && [ ! -L /data/local ]; then
-  rm -f /data/local/synclip/synclip.jar /data/local/synclip/libsynclip_android.so
+  rm -f /data/local/synclip/synclip.jar /data/local/synclip/libsynclip_android.so /data/local/synclip/alert.mode
   rmdir /data/local/synclip 2>/dev/null || true
 fi
 if [ -d /data/adb/synclip ] && [ ! -L /data/adb/synclip ] &&

@@ -44,6 +44,11 @@ constexpr UINT command_error = 101;
 constexpr UINT command_exit = 102;
 constexpr UINT command_pair = 103;
 constexpr UINT command_devices = 104;
+constexpr UINT command_startup = 105;
+constexpr UINT command_incoming_preview = 106;
+constexpr wchar_t startup_key[] = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+constexpr wchar_t settings_key[] = L"Software\\SynClip";
+constexpr wchar_t preview_value[] = L"ShowIncomingPreview";
 
 struct Config {
     std::string bind_address = "0.0.0.0";
@@ -96,6 +101,38 @@ std::filesystem::path default_config_path() {
     }
     value.resize(length);
     return std::filesystem::path(value) / L"SynClip" / L"config.ini";
+}
+
+std::optional<std::wstring> startup_command(const std::filesystem::path& config, bool custom_config) {
+    wchar_t executable[MAX_PATH]{};
+    const auto length = GetModuleFileNameW(nullptr, executable, static_cast<DWORD>(std::size(executable)));
+    if (length == 0 || length == std::size(executable)) {
+        return std::nullopt;
+    }
+
+    std::wstring command = L"\"" + std::wstring(executable, length) + L"\" --startup";
+    if (custom_config) {
+        command += L" --config \"" + config.native() + L"\"";
+    }
+    // Windows limits each Run command to 260 characters.
+    return command.size() < MAX_PATH ? std::make_optional(std::move(command)) : std::nullopt;
+}
+
+bool startup_enabled(const std::optional<std::wstring>& command) {
+    if (!command) {
+        return false;
+    }
+    wchar_t saved[MAX_PATH]{};
+    DWORD bytes = sizeof(saved);
+    return RegGetValueW(HKEY_CURRENT_USER, startup_key, app_name, RRF_RT_REG_SZ, nullptr, saved, &bytes) == ERROR_SUCCESS &&
+           *command == saved;
+}
+
+bool incoming_preview_enabled() {
+    DWORD enabled = 0;
+    DWORD bytes = sizeof(enabled);
+    return RegGetValueW(HKEY_CURRENT_USER, settings_key, preview_value, RRF_RT_REG_DWORD, nullptr, &enabled, &bytes) ==
+               ERROR_SUCCESS && enabled == 1;
 }
 
 void create_config(const std::filesystem::path& path) {
@@ -332,7 +369,8 @@ ClipboardResult write_clipboard(HWND window, const PendingWrite& pending, DWORD&
 
 class Receiver {
 public:
-    explicit Receiver(std::filesystem::path path) : path_(std::move(path)) {}
+    Receiver(std::filesystem::path path, bool custom_config)
+        : path_(std::move(path)), startup_command_(startup_command(path_, custom_config)) {}
 
     int run(HINSTANCE instance, Config config) {
         hub_ = std::make_unique<synclip::Hub>(path_.parent_path() / L"devices.ini", config.key);
@@ -554,13 +592,16 @@ private:
             return;
         }
         KillTimer(window_, write_timer);
-        pending_clipboard_.reset();
         if (result == ClipboardResult::written) {
             written_sequence_ = written_sequence;
             clipboard_status_ = L"已同步手机文本";
+            if (show_incoming_preview_) {
+                show_clipboard_notification(pending_clipboard_->text);
+            }
         } else if (result != ClipboardResult::superseded) {
             clipboard_status_ = L"手机文本写入失败";
         }
+        pending_clipboard_.reset();
     }
 
     bool is_self_write(ClipboardRevision revision) const {
@@ -658,6 +699,62 @@ private:
         }
     }
 
+    void show_clipboard_notification(std::wstring_view text) const {
+        NOTIFYICONDATAW icon{};
+        icon.cbSize = sizeof(icon);
+        icon.hWnd = window_;
+        icon.uID = 1;
+        icon.uFlags = NIF_INFO;
+        if (!text.empty()) {
+            constexpr wchar_t title[] = L"收到手机剪贴板";
+            std::copy(std::begin(title), std::end(title), icon.szInfoTitle);
+            icon.dwInfoFlags = NIIF_INFO | NIIF_RESPECT_QUIET_TIME;
+            constexpr auto capacity = std::size(icon.szInfo) - 1;
+            if (text.size() <= capacity) {
+                std::copy(text.begin(), text.end(), icon.szInfo);
+            } else {
+                size_t length = capacity - 1;
+                if (IS_HIGH_SURROGATE(text[length - 1])) {
+                    --length;
+                }
+                std::copy_n(text.begin(), length, icon.szInfo);
+                icon.szInfo[length] = L'\u2026';
+            }
+        }
+        Shell_NotifyIconW(NIM_MODIFY, &icon);
+    }
+
+    void toggle_startup(HWND window) const {
+        if (!startup_command_) {
+            MessageBoxW(window, L"程序或配置文件路径太长，无法注册登录启动。", app_name, MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        LSTATUS result;
+        if (startup_enabled(startup_command_)) {
+            result = RegDeleteKeyValueW(HKEY_CURRENT_USER, startup_key, app_name);
+        } else {
+            const auto& command = *startup_command_;
+            const auto bytes = static_cast<DWORD>((command.size() + 1) * sizeof(wchar_t));
+            result = RegSetKeyValueW(HKEY_CURRENT_USER, startup_key, app_name, REG_SZ, command.c_str(), bytes);
+        }
+        if (result != ERROR_SUCCESS) {
+            MessageBoxW(window, L"无法保存 Windows 登录启动设置。", app_name, MB_OK | MB_ICONERROR);
+        }
+    }
+
+    void toggle_incoming_preview(HWND window) {
+        const DWORD enabled = show_incoming_preview_ ? 0 : 1;
+        if (RegSetKeyValueW(HKEY_CURRENT_USER, settings_key, preview_value, REG_DWORD, &enabled, sizeof(enabled)) != ERROR_SUCCESS) {
+            MessageBoxW(window, L"无法保存剪贴板通知设置。", app_name, MB_OK | MB_ICONERROR);
+            return;
+        }
+        show_incoming_preview_ = enabled != 0;
+        if (!show_incoming_preview_) {
+            show_clipboard_notification({});
+        }
+    }
+
     void show_menu() {
         using Menu = std::unique_ptr<std::remove_pointer_t<HMENU>, decltype(&DestroyMenu)>;
         Menu menu(CreatePopupMenu(), DestroyMenu);
@@ -672,6 +769,10 @@ private:
         AppendMenuW(menu.get(), MF_STRING | (network_ready_ ? MF_ENABLED : MF_GRAYED), command_pair, L"扫码配对…");
         AppendMenuW(menu.get(), MF_STRING, command_devices, L"管理设备…");
         AppendMenuW(menu.get(), MF_STRING, command_config, L"打开网络配置…");
+        AppendMenuW(menu.get(), MF_STRING | (startup_enabled(startup_command_) ? MF_CHECKED : MF_UNCHECKED),
+                    command_startup, L"登录 Windows 时启动");
+        AppendMenuW(menu.get(), MF_STRING | (show_incoming_preview_ ? MF_CHECKED : MF_UNCHECKED),
+                    command_incoming_preview, L"通知中显示手机剪贴板");
         if (!error_.empty()) {
             AppendMenuW(menu.get(), MF_STRING, command_error, L"查看错误…");
         }
@@ -693,6 +794,10 @@ private:
             MessageBoxW(window, error_.c_str(), L"SynClip 接收器出错", MB_OK | MB_ICONERROR);
         } else if (command == command_config) {
             open_config(window);
+        } else if (command == command_startup) {
+            toggle_startup(window);
+        } else if (command == command_incoming_preview) {
+            toggle_incoming_preview(window);
         } else if ((command == command_pair || command == command_devices) && pairing_ui_) {
             try {
                 if (command == command_pair) {
@@ -723,6 +828,8 @@ private:
     }
 
     std::filesystem::path path_;
+    std::optional<std::wstring> startup_command_;
+    bool show_incoming_preview_ = incoming_preview_enabled();
     HWND window_ = nullptr;
     UINT taskbar_created_ = 0;
     int exit_code_ = 0;
@@ -761,10 +868,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
                         app_name, MB_OK | MB_ICONINFORMATION);
             return 0;
         }
-        if (argc == 1) {
+        const bool startup = argc > 1 && std::wstring_view(args[1]) == L"--startup";
+        const int first_option = startup ? 2 : 1;
+        const bool custom_config = argc == first_option + 2 &&
+                                   std::wstring_view(args[first_option]) == L"--config" && *args[first_option + 1];
+        if (argc == first_option) {
             path = default_config_path();
-        } else if (argc == 3 && std::wstring_view(args[1]) == L"--config" && *args[2]) {
-            path = std::filesystem::absolute(args[2]);
+        } else if (custom_config) {
+            path = std::filesystem::absolute(args[first_option + 1]);
         } else {
             throw std::runtime_error("Usage: SynClip.exe [--config PATH]");
         }
@@ -776,11 +887,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             throw std::runtime_error("Could not check for an existing receiver.");
         }
         if (mutex_error == ERROR_ALREADY_EXISTS) {
-            MessageBoxW(nullptr, L"SynClip 已在此会话运行。请查看系统托盘。", app_name, MB_OK | MB_ICONINFORMATION);
+            if (!startup) {
+                MessageBoxW(nullptr, L"SynClip 已在此会话运行。请查看系统托盘。", app_name, MB_OK | MB_ICONINFORMATION);
+            }
             return 0;
         }
 
-        return Receiver(path).run(instance, load_config(path));
+        return Receiver(path, custom_config).run(instance, load_config(path));
     } catch (const std::exception& error) {
         auto message = decode_utf8(error.what()).value_or(L"未知错误");
         if (!path.empty()) {
